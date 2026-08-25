@@ -1,4 +1,3 @@
-# hello
 # RecoverAI — Agent Instructions
 
 ## Project
