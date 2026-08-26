@@ -162,15 +162,203 @@ db61984  feat: add razorpay webhook endpoint
 
 ---
 
+---
+
+## Milestone 3 — Canonical Payment State Derivation
+
+**Status: COMPLETE**
+
+### Objective
+
+Build a small, deterministic canonical payment-state derivation layer that
+examines the persisted webhook event history for an underlying payment and
+determines its current factual payment state.
+
+M3 answers: "What is the current factual payment state for this underlying
+payment, based on the Razorpay events RecoverAI has received?"
+
+M3 is NOT the recovery engine, scoring engine, AI, dashboard, or polling.
+
+### What was built
+
+| Component | Path |
+|-----------|------|
+| Canonical state derivation (pure + DB) | `lib/payments/state.ts` |
+| Payment state API route | `app/api/payment-state/route.ts` |
+| M3 unit + integration tests | `tests/payment-state.test.mjs` |
+| DB inspection helper | `scripts/inspect-m2-events.mjs` |
+
+### Canonical State Model
+
+Four states — chosen as the smallest sensible model that distinguishes all
+factual payment outcomes:
+
+| State | Meaning |
+|-------|---------|
+| `UNKNOWN` | No recognised state-bearing events received |
+| `FAILED` | `payment.failed` received; no higher-finality event |
+| `AUTHORIZED` | `payment.authorized` received; no capture yet |
+| `CAPTURED` | `payment.captured` received — highest finality |
+
+`RECOVERED`, `RECOVERABLE`, `LOST`, `SCORE`, and `AI_DIAGNOSIS` are
+deliberately absent — those belong to later milestones.
+
+### General State-Derivation Rule
+
+**Event-type finality precedence:**
+
+```
+CAPTURED (rank 3) > AUTHORIZED (rank 2) > FAILED (rank 1) > UNKNOWN (rank 0)
+```
+
+From all webhook events for a payment, the canonical state is the one
+carried by the event type with the **highest finality rank**.
+
+`payment_link.paid` carries **no rank** — it is a correlation/confirmation
+signal only, not an independent payment state.
+
+#### Why this rule is semantically correct
+
+Razorpay's payment lifecycle has irreversible positive finality:
+
+- A captured payment cannot become un-captured.
+- A `payment.failed` event received after `payment.captured` is a webhook
+  delivery artifact (out-of-order or retry), not a state reversal.
+- `payment.authorized` is a transient state that terminates in either
+  capture or failure; it never supersedes a completed capture.
+
+The same rule handles ALL valid event orderings without special cases:
+
+```
+failed                          → FAILED
+authorized                      → AUTHORIZED
+captured                        → CAPTURED
+failed → authorized             → AUTHORIZED
+authorized → captured           → CAPTURED
+failed → captured               → CAPTURED
+captured → failed               → CAPTURED   (finality preserved)
+authorized → failed → captured  → CAPTURED
+payment_link.paid + captured    → CAPTURED
+duplicates of any event         → same state (idempotent by design)
+```
+
+### Payment Identity Correlation
+
+The canonical payment ID (`pay_xxx`) is the single correlation key.
+
+For all event types (including `payment_link.paid`), correlation uses
+SQLite `json_extract` on the `raw_payload` column:
+
+```sql
+SELECT DISTINCT event_type
+FROM   webhook_events
+WHERE  json_extract(raw_payload, '$.payload.payment.entity.id') = ?
+```
+
+This works uniformly across all event types. For `payment_link.paid`,
+`related_entity_id` stores the payment link ID (`plink_xxx`), but
+`payload.payment.entity.id` in the raw payload always contains the
+underlying payment ID — confirmed by M2 real event inspection.
+
+### Database Index
+
+The `idx_webhook_events_related_entity_id` index on `related_entity_id`
+was already created in M2 and covers `payment.*` lookups efficiently.
+
+M3 uses `json_extract` on `raw_payload` for uniform correlation; this
+expression is not separately indexed (noted for M5 optimisation if needed).
+
+No new indexes were added — the M2 index is sufficient at current scale.
+
+### API Route
+
+```
+GET /api/payment-state?paymentId=pay_xxx
+```
+
+Response:
+```json
+{
+  "paymentId": "pay_TUJOzQxoEqFSLU",
+  "state": "CAPTURED",
+  "derivedAt": "2026-08-26T15:00:00.000Z"
+}
+```
+
+### Real M2 Database Results
+
+| Payment ID | Events in DB | Derived State |
+|------------|-------------|---------------|
+| `pay_TUJOzQxoEqFSLU` | `payment.authorized`, `payment.captured`, `payment_link.paid` | **CAPTURED** |
+| `pay_TUJULUouXtIq8y` | `payment.failed` | **FAILED** |
+
+Cross-contamination: confirmed absent — each payment ID is queried
+independently via its own `json_extract` predicate.
+
+### Tests
+
+21 tests, all pass. Two layers:
+
+**Layer 1 — Pure unit tests (`derivePaymentStateFromEvents`):**
+1. `failed only → FAILED`
+2. `authorized only → AUTHORIZED`
+3. `captured only → CAPTURED`
+4. `authorized → captured → CAPTURED`
+5. `failed → captured → CAPTURED`
+6. `captured → failed → CAPTURED` (out-of-order)
+7. `payment_link.paid + captured → CAPTURED`
+8a. `duplicate payment.failed → FAILED` (idempotent)
+8b. `duplicate payment.captured → CAPTURED` (idempotent)
+9a. `captured → authorized (reversed) → CAPTURED`
+9b. `authorized → failed (reversed) → AUTHORIZED`
+9c. `payment_link.paid → captured (plink first) → CAPTURED`
+EXTRA: `authorized → failed → captured → CAPTURED` (general rule demonstration)
+EXTRA: `authorized → failed → AUTHORIZED` (no capture)
+EXTRA: `payment_link.paid alone → UNKNOWN`
+EXTRA: `empty event list → UNKNOWN`
+EXTRA: `unknown event type → UNKNOWN`
+
+**Layer 2 — DB integration tests (`derivePaymentState`, real M2 events):**
+10a. `pay_TUJOzQxoEqFSLU → CAPTURED` ✅
+10b. `pay_TUJULUouXtIq8y → FAILED` ✅
+10c. Cross-contamination check: CAPTURED ≠ FAILED ✅
+10d. Synthetic/unknown payment ID → UNKNOWN ✅
+
+### Unresolved Edge Cases
+
+None. All required transitions are handled deterministically by the
+finality-precedence rule.
+
+### Build and lint status
+
+- `npm run build` passes cleanly (exit 0). Route `ƒ /api/payment-state` registered.
+- `npm run lint` passes (exit 0). Same pre-existing M1 warning — unchanged.
+- All 21 M3 tests pass. All M2 tests continue to pass.
+
+### M2 regression
+
+M2 real event records are untouched (verified via `scripts/inspect-m2-events.mjs`).
+M2 DB schema is unchanged. M2 committed code is unchanged.
+
+### Milestone commits
+
+```
+1. feat: add canonical payment state derivation
+2. feat: add payment state API route
+3. test: cover payment state transitions
+4. docs: document canonical payment states
+```
+
+---
+
 ## Upcoming Milestones
 
 | Milestone | Title |
 |-----------|-------|
-| M3 | Payment status polling fallback |
 | M4 | Recovery state and recovered revenue tracking |
 | M5 | Deterministic recovery scoring |
 | M6 | AI diagnosis and recommendation |
 | M7 | Merchant dashboard |
 | M8 | End-to-end demo and polish |
 
-Implementation details for M3–M8 are not yet defined.
+Implementation details for M4–M8 are not yet defined.
