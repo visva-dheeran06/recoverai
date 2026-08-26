@@ -34,6 +34,9 @@ Thumbs.db
 *.swp
 *.swo
 
+# Local database (SQLite — runtime data, not source)
+/data/
+
 # Logs
 npm-debug.log*
 yarn-debug.log*
