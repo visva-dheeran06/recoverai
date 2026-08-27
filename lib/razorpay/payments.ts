@@ -190,15 +190,24 @@ export function classifyRazorpayError(
     if (maybeNormalized.statusCode !== undefined) {
       // HTTP error from Razorpay.
       const code = Number(maybeNormalized.statusCode);
-      if (code === 404) {
+      const description = maybeNormalized.error?.description ?? "";
+
+      // Razorpay returns 404 for nonexistent IDs in some contexts, but was
+      // observed returning HTTP 400 with "The id provided does not exist" in
+      // real Test Mode verification (confirmed: scripts/test-m4-live.mjs).
+      // Both cases are classified as not_found.
+      if (
+        code === 404 ||
+        (code === 400 && description.toLowerCase().includes("does not exist"))
+      ) {
         return { outcome: "not_found" };
       }
-      // Extract a safe description — do NOT include credentials.
-      const description =
-        maybeNormalized.error?.description ?? "Razorpay API error";
+
+      // Other HTTP errors — extract a safe description (no credentials).
+      const safeDescription = description || "Razorpay API error";
       return {
         outcome: "api_error",
-        message: `Razorpay API returned status ${code}: ${description}`,
+        message: `Razorpay API returned status ${code}: ${safeDescription}`,
       };
     }
   }

@@ -200,7 +200,20 @@ describe("classifyRazorpayError — error classification", () => {
     assert.equal(result.outcome, "not_found");
   });
 
-  test("12. SDK 400 error → api_error with message", () => {
+  test("11b. SDK 400 with 'does not exist' (real Razorpay Test Mode behavior) → not_found", () => {
+    // VERIFIED by live Test Mode call (scripts/test-m4-live.mjs):
+    // Razorpay returns HTTP 400 (not 404) for pay_DOESNOTEXIST with this description.
+    const sdkError = {
+      statusCode: 400,
+      error: { code: "BAD_REQUEST_ERROR", description: "The id provided does not exist" },
+    };
+    const result = classifyRazorpayError(sdkError);
+    assert.equal(result.outcome, "not_found",
+      "Razorpay 400 'does not exist' must be classified as not_found (confirmed live)"
+    );
+  });
+
+  test("12. SDK 400 with different error (not not_found) → api_error with message", () => {
     const sdkError = {
       statusCode: 400,
       error: { code: "BAD_REQUEST_ERROR", description: "The amount is not valid" },
