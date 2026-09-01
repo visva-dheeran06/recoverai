@@ -576,10 +576,250 @@ independently.
 
 ---
 
+## Milestone 6 — Deterministic Recovery Scoring
+
+**Status: COMPLETE**
+
+### Objective
+
+Compute a deterministic, explainable recovery score for any payment, based
+exclusively on evidence already persisted in the project (M2 webhook events)
+and the M3 canonical state — without calling the Razorpay API.
+
+M6 answers: **"Based on the verified evidence we currently have, how recoverable
+is this payment?"**
+
+M6 MUST NOT:
+- use LLM / AI inference
+- call the Razorpay API (that is M4)
+- duplicate M5 reconciliation
+- modify the database
+- produce non-deterministic output
+- fabricate evidence
+
+### Architecture
+
+```
+M2: webhook_events (persisted evidence)
+        ↓
+M3: derivePaymentState() → UNKNOWN/FAILED/AUTHORIZED/CAPTURED
+        ↓
+M6: computeRecoveryScore() → RecoveryScoreResult
+        ↓
+M7: AI Diagnosis + Recommendation  (next milestone)
+```
+
+### What was built
+
+| Component | Path |
+|-----------|------|
+| Scoring logic + types | `lib/payments/recovery-score.ts` |
+| M6 API route | `app/api/recovery-score/route.ts` |
+| M6 tests (68 tests) | `tests/recovery-score.test.mjs` |
+
+### Scoring Model (0–100)
+
+| Factor | Max Points | Signal source |
+|--------|-----------|---------------|
+| Failure Type | 40 | `error_source` from `payment.failed` webhook payload |
+| Payment History | 25 | Prior `payment.captured` events for same `contact` phone number |
+| Retry History | 15 | Prior `payment.failed` events for same `contact` before this payment |
+| Amount / Context | 10 | `amount` (paise) from webhook payload |
+| Recency | 10 | `created_at` UNIX timestamp from webhook payload |
+| **Total** | **100** | |
+
+### Score Tiers
+
+| Score | Tier |
+|-------|------|
+| 70–100 | HIGH |
+| 40–69 | MEDIUM |
+| 0–39 | LOW |
+
+### Failure Type Classification (40 pts)
+
+| State / error_source | Points | Rationale |
+|----------------------|--------|-----------|
+| CAPTURED | 40 | Already succeeded — maximum score |
+| AUTHORIZED | 38 | Pending capture — highly recoverable |
+| FAILED + `razorpay` | 35 | Infrastructure error — transient, highly retryable |
+| FAILED + `bank` | 28 | Bank decline — often transient (limits, funds) |
+| FAILED + `business` | 18 | Merchant config issue — needs merchant action |
+| FAILED + `customer` | 10 | Customer action — depends on willingness to retry |
+| FAILED + unknown source | 15 | Failure confirmed, source unclassified |
+| UNKNOWN (no events) | 20 | No failure evidence — cautious neutral |
+
+### Payment History Scoring (25 pts)
+
+Uses prior `payment.captured` events for the same `contact` phone number,
+excluding the current payment.
+
+| Prior successes | Points |
+|----------------|--------|
+| ≥ 2 | 25 — strong repeat customer |
+| 1 | 18 — known payer |
+| 0 | 0 — no positive history |
+| contact unavailable | 0, marked `available: false` |
+
+### Retry History Scoring (15 pts)
+
+Uses prior `payment.failed` events for the same `contact` before this
+payment's `created_at`.
+
+| Prior failures | Points |
+|---------------|--------|
+| 0 | 15 — first failure |
+| 1 | 10 — one prior attempt |
+| 2 | 5 — persistent difficulty |
+| ≥ 3 | 0 — significant pattern |
+| contact unavailable | 7 (neutral), marked `available: false` |
+
+### Amount / Context Scoring (10 pts)
+
+| Amount (paise) | INR | Points |
+|---------------|-----|--------|
+| ≤ 1,000 | ≤ ₹10 | 10 |
+| ≤ 10,000 | ≤ ₹100 | 8 |
+| ≤ 100,000 | ≤ ₹1,000 | 6 |
+| ≤ 1,000,000 | ≤ ₹10,000 | 4 |
+| > 1,000,000 | > ₹10,000 | 2 |
+| unavailable | — | 5 (neutral) |
+
+### Recency Scoring (10 pts)
+
+Uses `created_at` UNIX timestamp. Caller supplies a `referenceTimestampSeconds`
+for deterministic testing; defaults to wall-clock time in production.
+
+| Age | Points |
+|-----|--------|
+| ≤ 1 day | 10 |
+| ≤ 7 days | 8 |
+| ≤ 30 days | 5 |
+| ≤ 90 days | 2 |
+| > 90 days | 0 |
+| unavailable | 5 (neutral) |
+
+### Confidence
+
+Reflects evidence completeness, NOT recovery probability.
+
+| Condition | Confidence |
+|-----------|-----------|
+| failure_type available + ≥ 3 total available | HIGH |
+| failure_type available + 2 total available | MEDIUM |
+| failure_type unavailable + ≥ 3 total available | MEDIUM |
+| < 2 factors available | LOW |
+
+### API Route
+
+```
+GET /api/recovery-score?paymentId=pay_xxx
+```
+
+Response `200`:
+
+```json
+{
+  "paymentId": "pay_xxx",
+  "webhookState": "FAILED",
+  "recoveryScore": 66,
+  "recoveryTier": "MEDIUM",
+  "confidence": "HIGH",
+  "factors": [
+    {
+      "factor": "failure_type",
+      "available": true,
+      "points": 28,
+      "maxPoints": 40,
+      "reason": "Failure source: bank decline. Bank declines are often transient..."
+    },
+    {
+      "factor": "payment_history",
+      "available": true,
+      "points": 18,
+      "maxPoints": 25,
+      "reason": "Known payer: 1 prior successful payment from the same contact."
+    },
+    ...
+  ],
+  "scoredAt": "2026-09-01T14:46:00.000Z"
+}
+```
+
+Response `400`: missing or invalid `paymentId`.
+
+### Missing Evidence Handling
+
+All scoring factors handle missing evidence deterministically:
+
+- No fabrication of customer history
+- Missing factors are marked `available: false` in the output
+- Missing factors receive documented neutral scores (not 0) where applicable:
+  - retry_history: 7 pts neutral (neither penalised nor rewarded)
+  - amount_context: 5 pts neutral
+  - recency: 5 pts neutral
+  - payment_history: 0 pts (no positive evidence = no positive contribution)
+
+### Security
+
+- Credentials never appear in any `RecoveryScoreResult`
+- Raw DB contents (emails, phone numbers) are not exposed in the score
+- Internal errors are caught and return a generic 500
+
+### Real Verification
+
+Using real M2 DB events (fixed reference timestamp 2026-09-01):
+
+| Payment ID | State | Score | Tier | Confidence |
+|------------|-------|-------|------|-----------|
+| `pay_TUJOzQxoEqFSLU` | CAPTURED | 73 | HIGH | HIGH |
+| `pay_TUJULUouXtIq8y` | FAILED (bank) | 79 | HIGH | HIGH |
+
+Note: The bank-failed payment scores higher than the captured payment because
+`pay_TUJULUouXtIq8y` has a prior successful payment from the same contact
+(`+919080279704`), contributing 18 payment_history points. This is correct
+behavior: a repeat customer who had a bank decline is highly recoverable.
+
+### Tests
+
+161 tests total (all pass):
+- 10 scoreFailureType unit tests (all failure classifications + edge cases)
+- 5 scorePaymentHistory unit tests
+- 6 scoreRetryHistory unit tests
+- 7 scoreAmountContext unit tests
+- 6 scoreRecency unit tests
+- 6 scoreToTier boundary tests
+- 6 computeConfidence tests
+- 11 computeRecoveryScoreFromEvidence pure integration tests
+- 7 computeRecoveryScore DB integration tests (real M2 DB)
+- 4 GET /api/recovery-score route contract tests
+- + all prior 93 M1–M5 regression tests passing
+
+### Build and lint status
+
+- `npm run build` passes cleanly. Route `ƒ /api/recovery-score` registered.
+- `npm run lint` passes (exit 0). Same pre-existing M1 warning — unchanged.
+- TypeScript: passes (no new errors).
+
+### Database changes
+
+None. M6 reads exclusively from the existing `webhook_events` table via
+`json_extract` queries. No schema modifications.
+
+### Milestone commits
+
+```
+feat: implement deterministic recovery scoring (M6)
+test: verify recovery scoring (M6)
+docs: finalize M6 milestone
+```
+
+---
+
 ## Upcoming Milestones
 
 | Milestone | Title |
 |-----------|-------|
-| M6 | AI diagnosis and recommendation |
-| M7 | Merchant dashboard |
-| M8 | End-to-end demo and polish |
+| M7 | AI Diagnosis and Recommendation |
+| M8 | Merchant Dashboard |
+| M9 | End-to-end Demo and Polish |
