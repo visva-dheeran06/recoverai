@@ -195,10 +195,16 @@ export function classifyRazorpayError(
       // Razorpay returns 404 for nonexistent IDs in some contexts, but was
       // observed returning HTTP 400 with "The id provided does not exist" in
       // real Test Mode verification (confirmed: scripts/test-m4-live.mjs).
-      // Both cases are classified as not_found.
+      //
+      // Razorpay may also return 400 with "not found" phrasing depending on
+      // the ID format or context. Both variants indicate the payment ID is
+      // unknown to this Razorpay account/mode — classify as not_found.
+      const lowerDesc = description.toLowerCase();
       if (
         code === 404 ||
-        (code === 400 && description.toLowerCase().includes("does not exist"))
+        (code === 400 &&
+          (lowerDesc.includes("does not exist") ||
+           lowerDesc.includes("not found")))
       ) {
         return { outcome: "not_found" };
       }

@@ -213,6 +213,19 @@ describe("classifyRazorpayError — error classification", () => {
     );
   });
 
+  test("11c. SDK 400 with 'not found' phrasing → not_found", () => {
+    // Some Razorpay API contexts or ID formats may return "not found" phrasing.
+    // Both are semantically equivalent — the payment ID is unknown.
+    const sdkError = {
+      statusCode: 400,
+      error: { code: "BAD_REQUEST_ERROR", description: "The requested payment not found" },
+    };
+    const result = classifyRazorpayError(sdkError);
+    assert.equal(result.outcome, "not_found",
+      "Razorpay 400 'not found' phrasing must be classified as not_found"
+    );
+  });
+
   test("12. SDK 400 with different error (not not_found) → api_error with message", () => {
     const sdkError = {
       statusCode: 400,
