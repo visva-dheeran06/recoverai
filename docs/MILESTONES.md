@@ -816,10 +816,203 @@ docs: finalize M6 milestone
 
 ---
 
+## Milestone 7 — Diagnosis and Recommendation
+
+M7 is being implemented in two phases.
+
+| Phase | Title | Status |
+|-------|-------|--------|
+| M7A | Deterministic Diagnosis + Recommendation | **COMPLETE** |
+| M7B | Optional AI Enhancement | PENDING (next session) |
+
+---
+
+## Milestone 7A — Deterministic Diagnosis and Recommendation
+
+**Status: COMPLETE**
+
+### Objective
+
+Interpret the evidence from M3 (canonical state) and M6 (recovery score) and
+produce a deterministic, explainable diagnosis of what happened to a payment
+and a concrete recommendation for the merchant.
+
+M7A answers: **"What happened to this payment, and what should the merchant do next?"**
+
+M7A MUST NOT:
+- use LLM / AI inference
+- call the Razorpay API
+- modify the database
+- fabricate evidence not present in M3/M6 output
+- expose customer PII (phone, email)
+- expose credentials or environment variables
+- produce non-deterministic output
+
+### Architecture
+
+```
+M2: webhook_events (persisted evidence)
+        ↓
+M3: derivePaymentState() → UNKNOWN/FAILED/AUTHORIZED/CAPTURED
+        ↓
+M6: computeRecoveryScore() → RecoveryScoreResult
+        ↓
+M7A: diagnosePayment() → DiagnosisResult
+        ↓
+M7B: optional AI enhancement (tomorrow)
+```
+
+### What was built
+
+| Component | Path |
+|-----------|------|
+| Diagnosis logic + types | `lib/payments/diagnosis.ts` |
+| M7A API route | `app/api/diagnosis/route.ts` |
+| M7A tests (41 tests) | `tests/diagnosis.test.mjs` |
+
+### Diagnosis Categories
+
+Derived exclusively from M6 `RecoveryScoreResult` (no extra DB queries):
+
+| Category | Trigger |
+|----------|---------|
+| `CAPTURED` | webhookState = CAPTURED |
+| `AUTHORIZED` | webhookState = AUTHORIZED |
+| `BANK_DECLINE` | FAILED + failure_type.points = 28 (error_source=bank) |
+| `CUSTOMER_ACTION_REQUIRED` | FAILED + failure_type.points = 10 (error_source=customer) |
+| `BUSINESS_CONFIGURATION` | FAILED + failure_type.points = 18 (error_source=business) |
+| `INFRASTRUCTURE_FAILURE` | FAILED + failure_type.points = 35 (error_source=razorpay) |
+| `UNKNOWN_PAYMENT_STATE` | FAILED + failure_type.points = 15, available=true |
+| `INSUFFICIENT_EVIDENCE` | FAILED + failure_type.points = 15, available=false; OR UNKNOWN state |
+
+### Recommendation Rules
+
+| Category | Action | Priority |
+|----------|--------|---------|
+| CAPTURED | `NO_ACTION` | LOW (fixed) |
+| AUTHORIZED | `CHECK_CAPTURE_STATUS` | MEDIUM (fixed) |
+| BANK_DECLINE | `RETRY_PAYMENT` | from M6 recoveryTier |
+| CUSTOMER_ACTION_REQUIRED | `CUSTOMER_ACTION_REQUIRED` | from M6 recoveryTier |
+| BUSINESS_CONFIGURATION | `REVIEW_MERCHANT_CONFIGURATION` | from M6 recoveryTier |
+| INFRASTRUCTURE_FAILURE | `RETRY_PAYMENT` | from M6 recoveryTier |
+| UNKNOWN_PAYMENT_STATE | `COLLECT_MORE_EVIDENCE` | LOW (fixed) |
+| INSUFFICIENT_EVIDENCE | `COLLECT_MORE_EVIDENCE` | LOW (fixed) |
+
+### API Route
+
+```
+GET /api/diagnosis?paymentId=pay_xxx
+```
+
+Response `200`:
+
+```json
+{
+  "paymentId": "pay_TUJULUouXtIq8y",
+  "webhookState": "FAILED",
+  "recoveryScore": 79,
+  "recoveryTier": "HIGH",
+  "confidence": "HIGH",
+  "diagnosis": {
+    "category": "BANK_DECLINE",
+    "summary": "The payment was declined by the customer's bank...",
+    "evidence": [
+      "Bank decline detected as the failure source.",
+      "Prior successful payment history exists for this contact.",
+      "No prior failed payment attempts detected for this contact.",
+      ...
+    ]
+  },
+  "recommendation": {
+    "action": "RETRY_PAYMENT",
+    "priority": "HIGH",
+    "message": "Ask the customer to retry the payment..."
+  },
+  "generation": {
+    "mode": "deterministic"
+  }
+}
+```
+
+Response `400`: missing or invalid `paymentId`.
+Response `500`: generic server error (no internal details exposed).
+
+### Security
+
+- No PII exposed (phone numbers, emails redacted from evidence)
+- No credentials or environment variable names in output
+- No raw DB content in output
+- Internal errors caught and return a generic 500
+
+### Database changes
+
+None. M7A reads exclusively from M6 (which reads from M2's `webhook_events` table).
+No new tables, columns, or indexes.
+
+### Real Verification
+
+Using real M2 DB events (fixed reference timestamp 2026-09-01):
+
+| Payment ID | State | Category | Action |
+|------------|-------|----------|--------|
+| `pay_TUJOzQxoEqFSLU` | CAPTURED | CAPTURED | NO_ACTION |
+| `pay_TUJULUouXtIq8y` | FAILED (bank) | BANK_DECLINE | RETRY_PAYMENT |
+| Unknown payment | UNKNOWN | INSUFFICIENT_EVIDENCE | COLLECT_MORE_EVIDENCE |
+
+### Tests
+
+202 tests total (all pass):
+- 41 new M7A tests:
+  - 10 `classifyDiagnosis` unit tests (all 8 categories + edge cases)
+  - 8 `buildDiagnosis` output shape and safety tests
+  - 11 `buildRecommendation` action/priority tests
+  - 11 `diagnosePayment` DB integration tests (real M2 DB)
+  - 4 GET /api/diagnosis route contract tests (mocked)
+- + all prior 161 M1–M6 regression tests passing
+
+### Build and lint status
+
+- `npm run build` passes cleanly. Route `ƒ /api/diagnosis` registered.
+- `npm run lint` passes (exit 0). Same pre-existing M1 warning — unchanged.
+- TypeScript: passes (no new errors).
+
+### Milestone commits
+
+```
+feat: implement deterministic M7 diagnosis and recommendation
+test: verify deterministic M7 diagnosis and recommendation
+docs: document M7A completion
+```
+
+---
+
+## Milestone 7B — Optional AI Enhancement
+
+**Status: PENDING (next session)**
+
+M7B will optionally enhance the M7A deterministic output with an AI layer.
+
+What M7B will add:
+- Optional AI provider integration (e.g., Gemini API)
+- AI-generated natural language diagnosis and recommendation when AI succeeds
+- Deterministic M7A output as fallback when AI fails or is not configured
+- `generation.mode` will be `"ai"` when AI is used, `"deterministic"` when not
+- AI output validation to ensure it does not contradict M3/M6 evidence
+- No change to M7A's deterministic logic or types
+- No change to the response contract shape
+
+What M7B will NOT change:
+- `recoveryScore`, `recoveryTier`, `confidence`, `webhookState` (authoritative from M6)
+- The `DiagnosisResult` shape (M7B will only replace `diagnosis.summary`,
+  `diagnosis.evidence`, and `recommendation.message` with AI text)
+- Any M1–M6 code
+
+---
+
 ## Upcoming Milestones
 
 | Milestone | Title |
 |-----------|-------|
-| M7 | AI Diagnosis and Recommendation |
+| M7B | Optional AI Enhancement (next session) |
 | M8 | Merchant Dashboard |
 | M9 | End-to-end Demo and Polish |
