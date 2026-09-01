@@ -351,14 +351,235 @@ M2 DB schema is unchanged. M2 committed code is unchanged.
 
 ---
 
+## Milestone 4 — Razorpay API Status Fallback
+
+**Status: COMPLETE**
+
+### Objective
+
+Provide an on-demand, independent observation of a Razorpay payment's current
+status directly from the Razorpay Payments API, independently of the webhook-
+derived M3 canonical state.
+
+M4 answers: "What does Razorpay's API say this payment is right now?"
+
+M4 is NOT reconciliation, polling, recovery logic, AI diagnosis, cron, or
+background jobs. It is a pure observation/fallback mechanism.
+
+### Architecture
+
+```
+PRIMARY:   Razorpay → webhook → webhook_events → M3 derivePaymentState()
+FALLBACK:  Razorpay API → fetchPaymentStatus() → M4 API route
+```
+
+### What was built
+
+| Component | Path |
+|-----------|------|
+| Razorpay payment status client | `lib/razorpay/payments.ts` |
+| M4 API route | `app/api/razorpay-payment-status/route.ts` |
+| M4 unit + route tests | `tests/razorpay-payment-status.test.mjs` |
+| Route handler tests (mocked) | `tests/razorpay-payment-status-route.test.mjs` |
+
+Authentication reuses `getRazorpayClient()` from `lib/razorpay/client.ts`.
+No new credentials or environment variables.
+
+### API Route
+
+```
+GET /api/razorpay-payment-status?paymentId=pay_xxx
+```
+
+Response shapes:
+- `200` — payment found; normalised observation returned
+- `400` — missing or malformed paymentId
+- `404` — payment not found in Razorpay (not_found outcome)
+- `500` — server configuration error (credentials missing)
+- `502` — Razorpay API error or network failure
+
+### Key types
+
+- `RazorpayPaymentFetchResult` — discriminated union: `success | not_found | api_error | config_error`
+- `RazorpayPaymentObservation` — normalised API snapshot (camelCase, ISO timestamps)
+
+### Real Razorpay Test Mode Verification
+
+**PAYMENT 1: `pay_TUJOzQxoEqFSLU`**
+- outcome: `success`
+- Razorpay status: `captured`
+- captured: `true`
+- amount: `10000` paise
+- currency: `INR`
+
+**PAYMENT 2: `pay_TUJULUouXtIq8y`**
+- outcome: `success`
+- Razorpay status: `failed`
+- captured: `false`
+- errorCode: `BAD_REQUEST_ERROR`
+- errorSource: `bank`
+- errorStep: `payment_authorization`
+- errorReason: `payment_failed`
+
+**NONEXISTENT ID BEHAVIOR:**
+
+`pay_DOESNOTEXIST` does NOT return HTTP 404 from Razorpay Test Mode.
+It returns HTTP 400 with description: `"The id provided does not exist"`.
+
+`classifyRazorpayError()` handles both:
+- `404` → `not_found`
+- `400 + description containing "does not exist" or "not found"` → `not_found`
+
+### Security
+
+- `key_id` and `key_secret` never appear in any response body or log
+- Raw SDK error objects never forwarded to clients
+- Internal error messages sanitised before returning
+
+### Tests
+
+93 tests total (all pass):
+- 10 validation tests (isValidPaymentId)
+- 10 route handler tests (mocked fetchPaymentStatus)
+- 10 normalizePaymentObservation tests
+- 21 classifyRazorpayError tests (including 11c: "not found" phrasing)
+- + all prior M2/M3 tests
+
+### Build and lint status
+
+- `npm run build` passes cleanly. Route `ƒ /api/razorpay-payment-status` registered.
+- `npm run lint` passes (exit 0). Same pre-existing M1 warning — unchanged.
+- TypeScript: passes (no new errors).
+
+### Milestone commits
+
+```
+bdbcf9a  feat: add Razorpay payment status client
+e8444c1  feat: expose Razorpay payment status API
+05b1ecf  test: verify Razorpay payment status against Test Mode
+(+ M4 fixup commit for classifyRazorpayError broadening)
+```
+
+---
+
+## Milestone 5 — Payment Reconciliation
+
+**Status: COMPLETE**
+
+### Objective
+
+Compare the M3 webhook-derived canonical payment state with the M4 Razorpay API
+observation, and classify the relationship between them.
+
+M5 answers: "Do our webhook records and Razorpay's API agree, and if not, what
+is the discrepancy?"
+
+M5 is NOT:
+- Automatic conflict resolution
+- A recovery engine
+- AI diagnosis
+- Background polling or cron
+- A mutation of M3 state or the database
+
+### Architecture
+
+```
+M3 (primary):  webhook_events → derivePaymentState() → UNKNOWN/FAILED/AUTHORIZED/CAPTURED
+M4 (fallback): Razorpay API   → fetchPaymentStatus() → RazorpayPaymentFetchResult
+M5 (compare):  M3 + M4        → reconcilePayment()  → ReconciliationResult
+```
+
+### What was built
+
+| Component | Path |
+|-----------|------|
+| Reconciliation logic + types | `lib/payments/reconciliation.ts` |
+| M5 API route | `app/api/reconciliation/route.ts` |
+| M5 unit + integration tests | `tests/reconciliation.test.mjs` |
+
+### Reconciliation Outcomes
+
+| Outcome | Meaning |
+|---------|---------|
+| `CONSISTENT` | Both M3 and M4 agree on the same effective payment outcome |
+| `API_AHEAD` | Razorpay API shows higher finality than webhook history |
+| `WEBHOOK_AHEAD` | Webhook-derived state is more final than the API observation |
+| `WEBHOOK_ONLY` | M4 API unavailable; webhook state exists |
+| `API_ONLY` | M4 has a meaningful state; M3=UNKNOWN (no webhook history) |
+| `NOT_FOUND` | Razorpay reports the payment does not exist |
+| `ERROR` | API observation could not be obtained |
+
+### Razorpay API Status → M3 Equivalent Mapping
+
+| Razorpay status | M3 equivalent |
+|-----------------|---------------|
+| `captured` | `CAPTURED` |
+| `authorized` | `AUTHORIZED` |
+| `failed` | `FAILED` |
+| `created` | _(no M3 equivalent — not yet settled)_ |
+| `refunded` | _(no M3 equivalent — post-capture reversal)_ |
+
+`refunded` + M3=`CAPTURED` → `CONSISTENT` (underlying payment was captured).
+`refunded` + any other M3 state → `WEBHOOK_ONLY`.
+
+### API Route
+
+```
+GET /api/reconciliation?paymentId=pay_xxx
+```
+
+Response: always `200` with the full `ReconciliationResult` (including `outcome`,
+`webhookState`, `apiObservation`, `summary`, `reconciledAt`).
+`400` for missing/malformed paymentId.
+
+### Real Integration Verification
+
+Using real M2 DB events and real Razorpay Test Mode API:
+
+| Payment ID | M3 State | Reconciliation Outcome |
+|------------|----------|------------------------|
+| `pay_TUJOzQxoEqFSLU` | `CAPTURED` | `CONSISTENT` |
+| `pay_TUJULUouXtIq8y` | `FAILED` | `CONSISTENT` |
+| `pay_DOESNOTEXIST` | `UNKNOWN` | `NOT_FOUND` or `ERROR`* |
+
+*Razorpay's exact error response shape may vary. Both `NOT_FOUND` and `ERROR` are
+valid outcomes for a payment unknown to the account. The test accepts either.
+
+Cross-contamination: confirmed absent — each payment ID queries its own state
+independently.
+
+### Security
+
+- Credentials never appear in `ReconciliationResult`
+- `reconcilePayment` never exposes `key_id`, `key_secret`, or env var names
+- Raw SDK errors are sanitised by `classifyRazorpayError` before propagation
+
+### Tests
+
+93 tests total (all pass):
+- 25 pure `classifyReconciliation` unit tests
+- 5 integration tests (`reconcilePayment` — real DB + real API)
+- M2/M3/M4 regression: all passing
+
+### Build and lint status
+
+- `npm run build` passes cleanly. Route `ƒ /api/reconciliation` registered.
+- `npm run lint` passes (exit 0). Same pre-existing M1 warning — unchanged.
+- TypeScript: passes (no new errors).
+
+### Milestone commits
+
+```
+(M5 commit)  feat: implement payment reconciliation (M5)
+(M5 commit)  test: verify payment reconciliation and finalize M4+M5
+```
+
+---
+
 ## Upcoming Milestones
 
 | Milestone | Title |
 |-----------|-------|
-| M4 | Recovery state and recovered revenue tracking |
-| M5 | Deterministic recovery scoring |
 | M6 | AI diagnosis and recommendation |
 | M7 | Merchant dashboard |
 | M8 | End-to-end demo and polish |
-
-Implementation details for M4–M8 are not yet defined.
