@@ -71,7 +71,7 @@ interface DashboardData {
 const DEMO_PAYMENTS = [
   { id: "pay_TUJOzQxoEqFSLU", label: "Captured", hint: "CAPTURED · NO_ACTION" },
   { id: "pay_TUJULUouXtIq8y", label: "Bank Failure", hint: "FAILED · BANK_DECLINE" },
-  { id: "pay_DEMO_UNKNOWN00", label: "Unknown", hint: "UNKNOWN · INSUFFICIENT EVIDENCE" },
+  { id: "pay_DEMOUNKNOWN000", label: "Unknown", hint: "UNKNOWN · INSUFFICIENT EVIDENCE" },
 ];
 
 const PAYMENT_ID_RE = /^pay_[A-Za-z0-9]{1,}$/;
