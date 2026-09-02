@@ -1169,10 +1169,10 @@ docs: finalize M7B milestone
 
 ## Upcoming Milestones
 
-| Milestone | Title |
-|-----------|-------|
+| Milestone | Title | Status |
+|-----------|-------|--------|
 | M8 | Merchant Dashboard | **COMPLETE** |
-| M9 | End-to-end Demo and Polish |
+| M9 | End-to-End Demo and Polish | **COMPLETE** |
 
 ---
 
@@ -1260,4 +1260,70 @@ None. M8 is a pure frontend layer.
 ```
 feat: implement merchant dashboard (M8)
 docs: finalize M8 milestone
+```
+
+---
+
+## Milestone 9 — End-to-End Demo and Polish
+
+**Status: COMPLETE**
+
+### Objective
+
+Verify the full product pipeline end-to-end, fix any correctness or reliability issues, and prepare for a live 4–5 minute contest demo.
+
+### What was done
+
+| Task | Result |
+|------|--------|
+| Full codebase inspection (M1–M8) | No architectural issues found |
+| `npm test` | 234/234 pass (no regressions) |
+| `npm run build` | Exit 0, all routes registered |
+| `npm run lint` | Exit 0 (1 pre-existing M1 warning, 0 errors) |
+| Three demo scenarios verified | See below |
+| M7B AI/deterministic paths verified | Deterministic path confirmed |
+| **Bug fix**: `pay_DEMO_UNKNOWN00` → `pay_DEMOUNKNOWN000` | Fixed |
+| README rewritten | Concise reviewer-ready documentation |
+
+### Bug fixed
+
+**`pay_DEMO_UNKNOWN00` failed validation.**
+
+The `pay_DEMO_UNKNOWN00` ID contains an underscore in its suffix, which violates the `^pay_[A-Za-z0-9]{1,}$` validation regex used by both the client and API routes. Clicking the "Unknown" quick-demo button showed a validation error instead of the expected INSUFFICIENT_EVIDENCE result.
+
+**Fix**: Changed to `pay_DEMOUNKNOWN000` (alphanumeric only). No other files changed.
+
+### Demo scenarios — verified results
+
+| Scenario | Payment ID | webhookState | category | action | generation.mode |
+|----------|-----------|-------------|---------|--------|----------------|
+| A — Bank Failure | `pay_TUJULUouXtIq8y` | FAILED | BANK_DECLINE | RETRY_PAYMENT | deterministic |
+| B — Captured | `pay_TUJOzQxoEqFSLU` | CAPTURED | CAPTURED | NO_ACTION | deterministic |
+| C — Unknown | `pay_DEMOUNKNOWN000` | UNKNOWN | INSUFFICIENT_EVIDENCE | COLLECT_MORE_EVIDENCE | deterministic |
+
+**Note on recovery scores**: The `recoveryScore` and `recoveryTier` include a time-based recency factor. As the payments age, the score decreases. The values in earlier milestone docs (79, 73) used a fixed reference timestamp (2026-09-01). Live values at demo time reflect actual wall-clock age. All stable authoritative fields (state, category, action, confidence, tier-to-score mapping) remain correct.
+
+### AI path verified
+
+- `GEMINI_API_KEY` is absent from `.env.local` → deterministic fallback confirmed.
+- `generation.mode = "deterministic"` for all three scenarios.
+- Deterministic path works identically with or without the Gemini package.
+- If a key is added, `enhanceWithAi()` will attempt AI enhancement; any failure returns the deterministic result unchanged.
+
+### Build / Test / Lint status
+
+- `npm test` → 234/234 pass
+- `npm run build` → exit 0 (all routes registered)
+- `npm run lint` → exit 0 (1 pre-existing M1 warning, 0 errors)
+- TypeScript: no new errors
+
+### Database changes
+
+None.
+
+### Milestone commits
+
+```
+fix: correct Unknown demo payment ID for validation (M9)
+docs: complete M9 milestone documentation
 ```
