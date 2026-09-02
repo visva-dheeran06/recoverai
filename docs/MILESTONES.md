@@ -823,7 +823,7 @@ M7 is being implemented in two phases.
 | Phase | Title | Status |
 |-------|-------|--------|
 | M7A | Deterministic Diagnosis + Recommendation | **COMPLETE** |
-| M7B | Optional AI Enhancement | PENDING (next session) |
+| M7B | Optional AI Enhancement | **COMPLETE** |
 
 ---
 
@@ -1009,10 +1009,167 @@ What M7B will NOT change:
 
 ---
 
+## Milestone 7B — Optional AI Enhancement
+
+**Status: COMPLETE**
+
+### Objective
+
+Add an optional Gemini AI enhancement layer on top of the M7A deterministic
+result. AI enhances readability of the three natural-language fields without
+altering any authoritative fields.
+
+The fundamental rule: **AI enhances M7A. M7A remains the source of truth.**
+
+If AI fails for any reason, the product continues to work identically to pure M7A.
+
+### Architecture
+
+```
+M7A: diagnosePayment() → DiagnosisResult (deterministic, mode="deterministic")
+          ↓  (best-effort, never throws)
+M7B: enhanceWithAi()  → DiagnosisResult (mode="ai" only on valid AI output)
+          ↓
+GET /api/diagnosis   → JSON response
+```
+
+### What was built
+
+| Component | Path |
+|-----------|------|
+| AI enhancement lib | `lib/payments/ai-enhancement.ts` |
+| Updated diagnosis route | `app/api/diagnosis/route.ts` |
+| M7B tests (32 tests) | `tests/ai-enhancement.test.mjs` |
+
+### Dependency added
+
+```
+@google/genai
+```
+
+Used via dynamic import inside `callGemini()` — never imported at module
+initialisation time. If the package is absent or the API key is unset,
+the fast-path returns the deterministic result immediately.
+
+### What AI is allowed to replace (only)
+
+| Field | Allowed |
+|-------|----------|
+| `diagnosis.summary` | ✅ |
+| `diagnosis.evidence` | ✅ |
+| `recommendation.message` | ✅ |
+
+### What AI may NEVER change
+
+| Field | Status |
+|-------|--------|
+| `paymentId` | 🔒 locked |
+| `webhookState` | 🔒 locked |
+| `recoveryScore` | 🔒 locked |
+| `recoveryTier` | 🔒 locked |
+| `confidence` | 🔒 locked |
+| `diagnosis.category` | 🔒 locked |
+| `recommendation.action` | 🔒 locked |
+| `recommendation.priority` | 🔒 locked |
+
+### Configuration
+
+- **Environment variable**: `GEMINI_API_KEY`
+- **Model**: `gemini-2.0-flash`
+- **Timeout**: 8 seconds
+- **No key**: deterministic fallback immediately, no SDK call
+
+### Fallback behaviour
+
+All of the following return `generation.mode = "deterministic"` unchanged:
+
+1. `GEMINI_API_KEY` absent or empty
+2. SDK error
+3. Network failure
+4. Timeout (> 8s)
+5. Rate limit / quota error
+6. Malformed JSON from model
+7. Missing required fields (`summary`, `evidence`, `message`)
+8. Wrong field types
+9. Empty `evidence` array
+10. Prohibited keys present (`category`, `action`, `recoveryScore`, etc.)
+11. Sensitive patterns in output (`rzp_test_*`, `RAZORPAY_KEY`, phone numbers)
+12. Markdown fences around JSON → stripped and retried
+
+### Privacy / Security
+
+- AI prompt contains ONLY M7A `DiagnosisResult` authoritative fields
+- No PII: no phone numbers, email addresses, customer data
+- No credentials: no API keys, env vars, Razorpay secrets
+- No raw webhook payloads or DB rows
+- Output validation rejects any AI response containing sensitive patterns
+- Internal AI errors are never exposed to API consumers
+
+### Prompt design
+
+System instruction makes the constraints explicit:
+- Do not change category, action, priority, score, tier, confidence, state
+- Only produce natural-language summary, evidence, message
+- Evidence must be grounded in provided deterministic evidence
+- Never output PII or credentials
+- Return only JSON: `{summary, evidence[], message}`
+
+### Output validation
+
+| Check | Action on failure |
+|-------|------------------|
+| `summary` is a non-empty string | fallback |
+| `evidence` is non-empty string array | fallback |
+| `message` is a non-empty string | fallback |
+| fields within length limits | fallback |
+| no prohibited keys present | fallback |
+| no sensitive patterns | fallback |
+
+### generation.mode values
+
+| Value | Meaning |
+|-------|---------|
+| `"deterministic"` | M7A result (no AI configured, or AI failed/rejected) |
+| `"ai"` | M7A result + AI-enhanced summary/evidence/message |
+
+### Tests
+
+234 tests total (all pass):
+- 32 new M7B tests:
+  - 4 AI success path tests (mode, summary, evidence, message)
+  - 8 authoritative field immutability tests
+  - 12 fallback scenario tests (null, throw, invalid JSON, missing fields, prohibited keys, sensitive patterns, markdown fences)
+  - 1 no-API-key test
+  - 1 PII-in-prompt security test
+  - 1 full-result preservation test
+  - 1 cross-payment contamination test
+  - 1 M7A regression test
+  - Mocked AI client — no real API calls in tests
+- + all prior 202 M1–M7A regression tests passing
+
+### Build and lint status
+
+- `npm run build` passes cleanly. Route `ƒ /api/diagnosis` registered.
+- `npm run lint` passes (exit 0). Same pre-existing M1 warning — unchanged.
+- TypeScript: passes (no new errors).
+
+### Database changes
+
+None. M7B is a pure enhancement layer on top of M7A. No schema changes.
+
+### Milestone commits
+
+```
+feat: add optional AI enhancement for M7B
+test: verify M7B AI and deterministic fallback
+docs: finalize M7B milestone
+```
+
+---
+
 ## Upcoming Milestones
 
 | Milestone | Title |
 |-----------|-------|
-| M7B | Optional AI Enhancement (next session) |
 | M8 | Merchant Dashboard |
 | M9 | End-to-end Demo and Polish |

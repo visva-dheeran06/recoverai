@@ -1,24 +1,31 @@
-﻿/**
+/**
  * GET /api/diagnosis?paymentId=pay_xxx
  *
- * Returns the M7A deterministic diagnosis and recommendation for a payment.
+ * Returns the M7A deterministic diagnosis and recommendation for a payment,
+ * optionally enhanced by M7B AI (Gemini).
  *
  * This is a thin adapter over `diagnosePayment` in
- * `lib/payments/diagnosis.ts`. All logic lives in the lib.
+ * `lib/payments/diagnosis.ts`. All deterministic logic lives in the lib.
+ *
+ * M7B: If GEMINI_API_KEY is present, `enhanceWithAi` is called as a
+ * best-effort post-processor. It may upgrade generation.mode to "ai" if it
+ * produces valid output. Any failure (missing key, SDK error, timeout, bad
+ * output) preserves the original deterministic result unchanged.
  *
  * This endpoint:
  *   - Reads from the M2 webhook_events database (via M6 -> M3)
  *   - Does NOT call the Razorpay API
  *   - Does NOT modify the database
- *   - Is fully deterministic
+ *   - Returns deterministic output when AI is unavailable
  *   - Never exposes PII, credentials, or internal errors
  *
  * Response shapes:
- *   200 - diagnosis completed
+ *   200 - diagnosis completed (generation.mode = "deterministic" or "ai")
  *   400 - missing or malformed paymentId
  *   500 - unexpected server error (generic message only)
  *
  * Milestone 7A: Deterministic Diagnosis and Recommendation.
+ * Milestone 7B: Optional AI Enhancement.
  *
  * MUST NOT be imported in browser-side code.
  */
@@ -61,7 +68,7 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
     );
   }
 
-  // 3. Compute diagnosis — should not throw, but guard defensively
+  // 3. Compute deterministic M7A diagnosis — should not throw, but guard defensively
   let result;
   try {
     result = diagnosePayment(paymentId);
@@ -74,7 +81,17 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
     );
   }
 
-  // 4. Return the result directly.
-  // The result never contains PII or credentials (enforced by diagnosePayment).
+  // 4. M7B: Attempt optional AI enhancement.
+  //    enhanceWithAi() NEVER throws — any failure returns the original result.
+  //    No API key → skipped instantly. Error/timeout → deterministic fallback.
+  try {
+    const { enhanceWithAi } = await import("@/lib/payments/ai-enhancement");
+    result = await enhanceWithAi(result);
+  } catch {
+    // Dynamic import or any unexpected failure — keep deterministic result
+  }
+
+  // 5. Return the result directly.
+  // The result never contains PII or credentials (enforced by diagnosePayment + enhanceWithAi).
   return NextResponse.json(result, { status: 200 });
 }
