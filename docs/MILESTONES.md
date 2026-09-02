@@ -1171,5 +1171,93 @@ docs: finalize M7B milestone
 
 | Milestone | Title |
 |-----------|-------|
-| M8 | Merchant Dashboard |
+| M8 | Merchant Dashboard | **COMPLETE** |
 | M9 | End-to-end Demo and Polish |
+
+---
+
+## Milestone 8 — Merchant Dashboard
+
+**Status: COMPLETE**
+
+### Objective
+
+Build a polished merchant-facing dashboard that visually demonstrates the
+complete payment recovery pipeline to a Razorpay/buildathon judge.
+
+The dashboard tells the story:
+> "Something went wrong → system determines what happened → reconciles evidence → calculates recovery likelihood → diagnoses the issue → recommends the action."
+
+### What was built
+
+| Component | Path |
+|-----------|------|
+| Global CSS design system | `app/globals.css` |
+| Updated root layout | `app/layout.tsx` |
+| Dashboard page (client component) | `app/page.tsx` |
+
+No new backend routes were created. No existing backend logic was modified.
+All data comes from existing M3–M7B APIs.
+
+### APIs consumed
+
+| API | Purpose |
+|-----|---------|
+| `GET /api/diagnosis?paymentId=` | M7A/M7B diagnosis + recommendation + recovery score + generation mode |
+| `GET /api/recovery-score?paymentId=` | M6 detailed factor breakdown for score visualization |
+| `GET /api/reconciliation?paymentId=` | M5 reconciliation result (webhook vs API comparison) |
+
+### Dashboard sections
+
+1. **Header** — RecoverAI branding, milestone badge, sticky navigation
+2. **Payment search** — Payment ID input + Analyze button + 3 quick demo buttons
+3. **Payment overview card** — Payment ID, webhook state badge, tier + confidence badges, animated recovery score ring (0–100)
+4. **Diagnosis card** — Category label, human-readable summary, grounded evidence list
+5. **Recommendation card** — Recommended action with icon, priority badge, merchant-facing message
+6. **Evidence reconciliation card** — Webhook state vs Razorpay API state side-by-side, outcome with color coding, reconciliation summary
+7. **Recovery score breakdown** — Per-factor progress bars (Failure Type, Payment History, Retry History, Amount, Recency) with data-unavailable annotation
+8. **Generation mode badge** — "✦ AI Enhanced" (purple) or "⊙ Deterministic" (slate) indicating M7B AI usage
+
+### Demo scenarios
+
+| Demo | Payment ID | Expected |
+|------|-----------|---------|
+| Captured | `pay_TUJOzQxoEqFSLU` | CAPTURED · Score 73 · NO_ACTION |
+| Bank Failure | `pay_TUJULUouXtIq8y` | FAILED · BANK_DECLINE · RETRY_PAYMENT |
+| Unknown | `pay_DEMO_UNKNOWN00` | UNKNOWN · INSUFFICIENT_EVIDENCE |
+
+All scenarios are selectable via one-click demo buttons.
+
+### Loading / Error / Empty states
+
+- **Empty**: clear prompt to enter a payment ID
+- **Loading**: spinner with "Running recovery analysis pipeline…"
+- **Error**: inline error card with human-readable message
+- **Partial failure**: reconciliation gracefully degrades if API is unreachable
+
+### Visual design
+
+- Dark fintech theme (`#0a0d14` base)
+- Status badges with semantic color coding (green/amber/red/blue/purple/slate)
+- Animated SVG score ring with tier-appropriate color
+- Per-factor horizontal progress bars
+- Responsive 2-column grid (collapses to single column on mobile)
+- Sticky header with product branding
+
+### Build / Test / Lint status
+
+- `npm run build` → exit 0 (page registered as `○ /` static)
+- `npm test` → 234/234 pass (no regressions)
+- `npm run lint` → exit 0 (same pre-existing M1 warning)
+- TypeScript: no new errors
+
+### Database changes
+
+None. M8 is a pure frontend layer.
+
+### Milestone commits
+
+```
+feat: implement merchant dashboard (M8)
+docs: finalize M8 milestone
+```
